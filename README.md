@@ -6,9 +6,17 @@
 
 Tool that makes a lossy mirror of your lossless music collection.
 
+# usage notes
+
+- Symlinks in the source directory will not be followed.
+- To force a full rebuild, delete the destination directory and database file.
+- All files that are not matched by the `--allowed` and `--ignored` flags will be passed through (hardlinked or copied, depending on the --copy flag).
+- Non-UTF8 file names or paths ARE NOT SUPPORTED and may result in strange output filenames.
+- Unexpected behaviour may occur if your destination directory is on a case-insensitive file system and your source directory had case collisions (e.g. `Song.flac` and `song.wav`, which would both get converted to `song.opus`). THIS SCENARIO IS NOT SUPPORTED.
+- If your filesystem doesn't support hardlinks (or if your destination directory is on a different fs from your source), use the `--copy` option to prevent the default hardlinking behaviour.
+
 # TODOs
 
-- [ ] Track renamed files using hash
 - [ ] Nix derivation and NixOS module (for setting up systemd timer)
 
 # dependencies

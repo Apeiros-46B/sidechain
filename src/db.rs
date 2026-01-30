@@ -6,9 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 
-use crate::worker::{FileInfo, FileStatus, ProcessedFile};
-
-pub type FileCache = HashMap<PathBuf, FileInfo>;
+use crate::worker::{FileCache, FileInfo, FileStatus, ProcessedFile};
 
 /// Open a connection to the database.
 pub fn connect(db_path: &Path) -> Result<Connection> {
@@ -37,7 +35,8 @@ pub fn init(conn: &Connection) -> Result<()> {
             dst_path  TEXT NOT NULL,
             hash      TEXT NOT NULL,
             mtime     INTEGER NOT NULL,
-            size      INTEGER NOT NULL
+            size      INTEGER NOT NULL,
+            config    TEXT NOT NULL -- e.g. 'opus:192', for change detection
         );
         CREATE INDEX IF NOT EXISTS idx_hash ON files(hash);",
         // ^^^ index for rename detection (finding a hash regardless of path)
@@ -53,9 +52,8 @@ pub fn load_cache(conn: &Connection) -> Result<FileCache> {
         conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0))?;
     let mut cache = HashMap::with_capacity(count as usize);
 
-    let mut stmt = conn.prepare(
-        "SELECT src_path, dst_path, hash, mtime, size FROM files",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT src_path, dst_path, hash, mtime, size, config FROM files")?;
 
     let iter = stmt.query_map([], |row| {
         let src_str: String = row.get(0)?;
@@ -63,6 +61,7 @@ pub fn load_cache(conn: &Connection) -> Result<FileCache> {
         let hash = row.get(2)?;
         let mtime = row.get(3)?;
         let size: i64 = row.get(4)?;
+        let config = row.get(5)?;
         Ok((
             PathBuf::from(src_str),
             FileInfo {
@@ -70,6 +69,7 @@ pub fn load_cache(conn: &Connection) -> Result<FileCache> {
                 hash,
                 mtime,
                 size: size as u64,
+                config,
             },
         ))
     })?;
@@ -91,8 +91,11 @@ pub fn ingest_results(
     let mut buf = Vec::with_capacity(BATCH_SIZE);
 
     for file in results {
-        if let FileStatus::Transcoded | FileStatus::Hardlinked = file.status {
-            buf.push(file);
+        match file.status {
+            FileStatus::PassedThrough
+            | FileStatus::Transcoded
+            | FileStatus::Reclaimed => buf.push(file),
+            _ => {}
         }
         if buf.len() >= BATCH_SIZE {
             flush_batch(conn, &buf)?;
@@ -110,13 +113,14 @@ fn flush_batch(conn: &mut Connection, files: &[ProcessedFile]) -> Result<()> {
     let tx = conn.transaction()?;
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO files (src_path, dst_path, hash, mtime, size)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO files (src_path, dst_path, hash, mtime, size, config)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(src_path) DO UPDATE SET
                 dst_path = excluded.dst_path,
                 hash = excluded.hash,
                 mtime = excluded.mtime,
-                size = excluded.size",
+                size = excluded.size,
+                config = excluded.config",
         )?;
         for file in files {
             stmt.execute(params![
@@ -125,6 +129,7 @@ fn flush_batch(conn: &mut Connection, files: &[ProcessedFile]) -> Result<()> {
                 file.info.hash,
                 file.info.mtime,
                 file.info.size as i64,
+                file.info.config,
             ])?;
         }
     }

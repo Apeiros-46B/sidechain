@@ -1,11 +1,17 @@
 use std::{
+    collections::HashMap,
     fs,
-    path::{Path, PathBuf}, process::Command,
+    io::Read,
+    path::{Path, PathBuf},
+    process::Command,
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 
-use crate::db::FileCache;
+use crate::util::{has_extension, map_src_to_dst};
+
+pub type FileCache = HashMap<PathBuf, FileInfo>;
+pub type OrphanCache = HashMap<String, Vec<FileInfo>>;
 
 #[derive(Debug, Clone, Default)]
 pub struct FileInfo {
@@ -13,6 +19,7 @@ pub struct FileInfo {
     pub hash: String,
     pub mtime: i64,
     pub size: u64,
+    pub config: String,
 }
 
 #[derive(Debug, Clone)]
@@ -24,114 +31,199 @@ pub struct ProcessedFile {
 
 #[derive(Debug, Clone)]
 pub enum FileStatus {
+    PassedThrough,
     Transcoded,
-    Hardlinked,
+    Reclaimed,
     Skipped,
-    Ignored,
 }
 
-pub fn process_file(
-    cache: &FileCache,
-    src: &Path,
-    src_root: &Path,
-    dst_root: &Path,
-    allowed_exts: &[String],
-    ignored_exts: &[String],
-    target_ext: &str,
-    bitrate: u32,
-) -> Result<ProcessedFile> {
+pub struct WorkerSettings<'a> {
+    pub src_root: &'a Path,
+    pub dst_root: &'a Path,
+    pub allowed_exts: &'a [String],
+    pub target_ext: &'a str,
+    pub bitrate: u32,
+    pub should_copy: bool,
+    pub orphans: &'a OrphanCache,
+    pub cache: &'a FileCache,
+}
+
+pub fn process_file(src: &Path, args: WorkerSettings) -> Result<ProcessedFile> {
+    let do_transcode = has_extension(src, args.allowed_exts);
+
+    // for change detection, when the user changes bitrate or format we should re-enc
+    // we should also track passed-through files, so we never mix the two types
+    let config = if do_transcode {
+        format!("{}:{}", args.target_ext, args.bitrate)
+    } else {
+        "passthrough".to_string()
+    };
+
     let meta = fs::metadata(src).context("failed to stat file")?;
     let mtime = meta
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
     let size = meta.len();
+    let dst = map_src_to_dst(
+        src,
+        args.src_root,
+        args.dst_root,
+        args.target_ext,
+        do_transcode,
+    )?;
 
-    if has_extension(src, ignored_exts) {
-        return Ok({
-            let src = src.to_path_buf();
-            ProcessedFile {
-                src,
-                info: FileInfo::default(),
-                status: FileStatus::Ignored,
-            }
-        });
-    }
-
-    let rel_path = src.strip_prefix(src_root).context("src not inside root")?;
-    let mut dst = dst_root.join(rel_path);
-
-    let do_transcode = has_extension(src, allowed_exts);
-    if do_transcode {
-        dst.set_extension(target_ext);
-    }
-
-    // fast path
-    if let Some(cached) = cache.get(src) {
-        if cached.mtime == mtime && cached.size == size && cached.dst.exists() {
-            return Ok({
-                let src = src.to_path_buf();
-                ProcessedFile {
-                    src,
-                    info: FileInfo {
-                        dst: dst,
-                        hash: cached.hash.clone(),
-                        mtime: cached.mtime,
-                        size: cached.size,
-                    },
-                    status: FileStatus::Skipped,
-                }
+    if let Some(hit) = args.cache.get(src) {
+        if hit.config != config {
+            // user changed bitrate or format, reprocess even if it's in the cache
+            log::debug!(
+                "config for file {} changed, reprocessing",
+                hit.dst.display(),
+            );
+        } else if hit.dst != dst {
+            // the source file was renamed, reprocess
+            log::debug!(
+                "file {} renamed to {}, reprocessing",
+                hit.dst.display(),
+                dst.display(),
+            );
+        } else if hit.mtime == mtime && hit.size == size && hit.dst.exists() {
+            // cache hit, the config and file are unchanged
+            // we only skip if EVERYTHING matches, including the dest path
+            return Ok(ProcessedFile {
+                src: src.to_path_buf(),
+                info: FileInfo {
+                    dst: dst,
+                    hash: hit.hash.clone(),
+                    mtime: hit.mtime,
+                    size: hit.size,
+                    config,
+                },
+                status: FileStatus::Skipped,
             });
+        }
+
+        if let Err(e) = fs::remove_file(&hit.dst) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "failed to remove stale file {}: {}",
+                    hit.dst.display(),
+                    e,
+                );
+            }
         }
     }
 
-    // slow path
-    // TODO: actually do something with this hash. we need to see when
-    // files in the source directory are renamed, and accordingly directly
-    // rename the files in the destination directory, instead of transcoding
-    // them again. this might require a large refactor of the cache system
     let hash = compute_hash(src)?;
     if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).context("failed to create dst dir")?;
+        // multiple workers may try to create the same directory
+        // don't handle this error, let later file operations fail if needed
+        // TODO: this might be bad for perf
+        _ = fs::create_dir_all(parent);
     }
 
+    // optimistic rename detection
+    if let Some(candidates) = args.orphans.get(&hash) {
+        for info in candidates {
+            if !info.dst.exists() {
+                continue;
+            }
+
+            // only reclaim if the config matches
+            if info.config != config {
+                continue;
+            }
+
+            if info.size != size {
+                log::warn!(
+                    "file {} and orphan {} have same hash but differing sizes",
+                    src.display(),
+                    info.dst.display(),
+                );
+                continue;
+            }
+
+            // remove target if it exists
+            if dst.exists() {
+                // don't handle this error, let the rename operation fail if needed
+                _ = fs::remove_file(&dst);
+            }
+
+            // rely on the OS to serialize renames. failure implies the file was
+            // already claimed by another worker or is invalid, in which case we
+            // just fall back to a safe option (re-transcode or passthrough)
+            if fs::rename(&info.dst, &dst).is_ok() {
+                // no other worker got it, we successfully renamed the file
+                return Ok(ProcessedFile {
+                    src: src.to_path_buf(),
+                    info: FileInfo {
+                        dst,
+                        hash,
+                        mtime,
+                        size,
+                        config,
+                    },
+                    status: FileStatus::Reclaimed,
+                });
+            }
+        }
+    }
+
+    // fallback to transcode or passthrough
     let status = if do_transcode {
-        spawn_ffmpeg(src, &dst, bitrate)?;
+        spawn_ffmpeg(src, &dst, args.bitrate)?;
         FileStatus::Transcoded
     } else {
         if dst.exists() {
             fs::remove_file(&dst)?;
         }
-        fs::hard_link(src, &dst).context("failed to hardlink")?;
-        FileStatus::Hardlinked
+        if args.should_copy {
+            fs::copy(src, &dst).context("failed to copy")?;
+        } else {
+            fs::hard_link(src, &dst).with_context(|| {
+                format!(
+                    "failed to hardlink {} -> {}. if source and destination are on different filesystems, or if your fs doesn't support hardlinks, use the --copy flag",
+                    src.display(),
+                    dst.display(),
+                )
+            })?;
+        }
+        FileStatus::PassedThrough
     };
 
     Ok(ProcessedFile {
         src: src.to_path_buf(),
-        info: FileInfo { dst, hash, mtime, size },
+        info: FileInfo {
+            dst,
+            hash,
+            mtime,
+            size,
+            config,
+        },
         status,
     })
 }
 
-fn has_extension(path: &Path, ext_list: &[String]) -> bool {
-    if let Some(ext) = path.extension() {
-        let ext_lower = ext.to_string_lossy().to_lowercase();
-        ext_list.iter().any(|e| e.to_lowercase() == ext_lower)
-    } else {
-        false
-    }
-}
-
 fn compute_hash(path: &Path) -> Result<String> {
-    let bytes = fs::read(path)?;
-    let hash = blake3::hash(&bytes);
-    Ok(hash.to_hex().to_string())
+    // streaming hash so we don't use a ton of memory on large input files
+    let mut file = fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn spawn_ffmpeg(src: &Path, dst: &Path, bitrate: u32) -> Result<()> {
     if dst.exists() {
         fs::remove_file(dst)?;
     }
+    #[rustfmt::skip]
     let status = Command::new("ffmpeg")
         // we are already running worker threads in parallel, each worker
         // thread shouldn't spawn even more threads
