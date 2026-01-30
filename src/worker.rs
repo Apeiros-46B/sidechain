@@ -138,7 +138,6 @@ fn spawn_ffmpeg(src: &Path, dst: &Path, bitrate: u32) -> Result<()> {
         .arg("-threads").arg("1")
         .arg("-v").arg("error")
         .arg("-i").arg(src)
-        .arg("-c:a").arg("libopus")
         .arg("-b:a").arg(format!("{bitrate}k"))
         .arg("-vn")
         .arg(dst)
