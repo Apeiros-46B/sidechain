@@ -11,7 +11,7 @@ let
     "-b" (toString cfg.bitrate)
   ]
   ++ (concatMap (x: [ "-a" x ]) cfg.allowedExtensions)
-  ++ (concatMap (x: [ "-i" x ]) cfg.ignoredExtensions)
+  ++ (concatMap (x: [ "-x" x ]) cfg.ignoredExtensions)
   ++ (optional (cfg.maxThreads != null) [ "-t" (toString cfg.maxThreads) ])
   ++ (optional cfg.copy "--copy");
 in {
