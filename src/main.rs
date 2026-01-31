@@ -186,7 +186,7 @@ fn find_src_files(args: &Args, db_path_canon: &Path) -> Result<Vec<PathBuf>> {
     log::info!("scanning source directory {}", args.source.display());
 
     // path and size, for sorting
-    let mut files = Vec::<(PathBuf, u64)>::new();
+    let mut files = Vec::<PathBuf>::new();
 
     // track allocated destinations to detect collisions (dst -> src)
     let mut dst_map = HashMap::<PathBuf, PathBuf>::new();
@@ -238,18 +238,13 @@ fn find_src_files(args: &Args, db_path_canon: &Path) -> Result<Vec<PathBuf>> {
             continue;
         }
 
-        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
         dst_map.insert(dst, path.to_path_buf());
-        files.push((entry.into_path(), size));
+        files.push(entry.into_path());
     }
-
-    // sort by descending size so later we process larger files first for efficiency
-    files.sort_by_cached_key(|(_, size)| *size);
-    files.reverse();
 
     log::info!("found {} files", files.len());
 
-    Ok(files.into_iter().map(|(path, _)| path).collect())
+    Ok(files)
 }
 
 // second return is a list of orphans for db pruning
@@ -286,7 +281,7 @@ fn spawn_workers(
 ) -> Result<WorkStats> {
     let (tx, rx) = std::sync::mpsc::channel();
 
-    rayon::spawn(move || {
+    std::thread::spawn(move || {
         use rayon::prelude::*;
 
         files.into_par_iter().for_each_with(tx, |tx, src| {

@@ -86,6 +86,11 @@ in {
       default = false;
       description = "Copy files instead of hardlinking (useful for FAT32 destinations).";
     };
+    nice = mkOption {
+      type = types.int;
+      default = 0;
+      description = "Niceness value set in systemd service.";
+    };
   };
 
   config = mkIf cfg.enable {
@@ -107,12 +112,13 @@ in {
     };
 
     systemd.services.sidechain = {
-      description = "sidechain music mirror";
+      description = "Sidechain music mirror";
       environment.RUST_LOG = cfg.logLevel;
 
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${cfg.package}/bin/sidechain ${concatStringsSep " " (flatten args)}";
+				Nice = cfg.nice;
         User = cfg.user;
         Group = cfg.group;
       };
