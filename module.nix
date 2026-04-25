@@ -13,6 +13,7 @@ let
   ++ (concatMap (x: [ "-a" x ]) cfg.allowedExtensions)
   ++ (concatMap (x: [ "-x" x ]) cfg.ignoredExtensions)
   ++ (optional (cfg.maxThreads != null) [ "-t" (toString cfg.maxThreads) ])
+  ++ (optional cfg.ignoreDotfiles "--ignore-dotfiles")
   ++ (optional cfg.copy "--copy");
 in {
   options.services.sidechain = {
@@ -44,15 +45,15 @@ in {
       description = "RUST_LOG environment variable level.";
     };
     sourceDir = mkOption {
-      type = types.path;
+      type = types.str;
       description = "Path to the lossless source directory.";
     };
     destinationDir = mkOption {
-      type = types.path;
+      type = types.str;
       description = "Path to the destination directory.";
     };
     dbPath = mkOption {
-      type = types.path;
+      type = types.str;
       default = "/var/lib/sidechain/sidechain.db";
       description = "Path to the SQLite database file.";
     };
@@ -65,6 +66,11 @@ in {
       type = types.listOf types.str;
       default = [];
       description = "List of extensions to ignore completely.";
+    };
+    ignoreDotfiles = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Ignore dotfiles in the source directory.";
     };
     format = mkOption {
       type = types.str;
@@ -117,8 +123,8 @@ in {
 
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${cfg.package}/bin/sidechain ${concatStringsSep " " (flatten args)}";
-				Nice = cfg.nice;
+        ExecStart = "${cfg.package}/bin/sidechain ${escapeShellArgs (flatten args)}";
+        Nice = cfg.nice;
         User = cfg.user;
         Group = cfg.group;
       };

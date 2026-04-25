@@ -51,6 +51,10 @@ struct Args {
     #[argh(option, short = 'x', long = "ignored")]
     ignored_exts: Vec<String>,
 
+    /// ignore dotfiles in the source directory
+    #[argh(switch, short = 'H', long = "ignore-dotfiles")]
+    ignore_dotfiles: bool,
+
     /// transcoded output format (file extension for ffmpeg)
     #[argh(option, short = 'f')]
     format: String,
@@ -62,10 +66,6 @@ struct Args {
     /// maximum number of threads to use (default=max(CORES - 1, 1))
     #[argh(option, short = 't')]
     max_threads: Option<usize>,
-
-    /// ignore dotfiles in the source directory
-    #[argh(switch, short = 'H', long = "ignore-dotfiles")]
-    ignore_dotfiles: bool,
 
     /// copy passed-through files instead of hardlinking. turn this on
     /// if the filesystem your destination directory is on doesn't support
