@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use walkdir::WalkDir;
 
 use crate::{
-    util::{has_extension, map_src_to_dst},
+    util::{has_extension, is_dotfile, map_src_to_dst},
     worker::{FileCache, FileStatus, OrphanCache, WorkerSettings},
 };
 
@@ -62,6 +62,10 @@ struct Args {
     /// maximum number of threads to use (default=max(CORES - 1, 1))
     #[argh(option, short = 't')]
     max_threads: Option<usize>,
+
+    /// ignore dotfiles in the source directory
+    #[argh(switch, short = 'H', long = "ignore-dotfiles")]
+    ignore_dotfiles: bool,
 
     /// copy passed-through files instead of hardlinking. turn this on
     /// if the filesystem your destination directory is on doesn't support
@@ -191,7 +195,12 @@ fn find_src_files(args: &Args, db_path_canon: &Path) -> Result<Vec<PathBuf>> {
     // track allocated destinations to detect collisions (dst -> src)
     let mut dst_map = HashMap::<PathBuf, PathBuf>::new();
 
-    for entry in WalkDir::new(&args.source) {
+    // we never push ignored files to the list, we don't need them later
+    // ignored files don't produce output, no collision is possible
+    let walker = WalkDir::new(&args.source).into_iter().filter_entry(|e| {
+        !args.ignore_dotfiles || !is_dotfile(e)
+    });
+    for entry in walker {
         let entry = entry?;
         if !entry.file_type().is_file() {
             log::trace!(
@@ -213,8 +222,6 @@ fn find_src_files(args: &Args, db_path_canon: &Path) -> Result<Vec<PathBuf>> {
             }
         }
 
-        // don't push ignored files to the list, we don't need them later
-        // ignored files don't produce output, no collision is possible
         if has_extension(path, &args.ignored_exts) {
             continue;
         }

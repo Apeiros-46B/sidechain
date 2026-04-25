@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use walkdir::DirEntry;
 
 pub fn has_extension(path: &Path, ext_list: &[String]) -> bool {
     if let Some(ext) = path.extension() {
@@ -9,6 +10,13 @@ pub fn has_extension(path: &Path, ext_list: &[String]) -> bool {
     } else {
         false
     }
+}
+
+pub fn is_dotfile(entry: &DirEntry) -> bool {
+    entry.file_name()
+        .to_str()
+        .map(|s| s.starts_with("."))
+        .unwrap_or(false)
 }
 
 pub fn map_src_to_dst(
